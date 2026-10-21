@@ -12,6 +12,9 @@ Standard library only. Reads RUNPOD_API_KEY, LLM_BASE_URL and LLM_API_KEY from t
     # give the agent the Runpod MCP server, using RUNPOD_API_KEY
     python3 examples/create_sandbox.py --ref <sha> --with-mcp
 
+    # once ready, run one prompt and print the reply and the tools it used
+    python3 examples/create_sandbox.py --ref <sha> --with-mcp --prompt "List my pods"
+
     python3 examples/create_sandbox.py --terminate <sandbox-id>
 """
 
@@ -40,6 +43,9 @@ mutation($input: CreateSandboxInput!) {
   }
 }"""
 TERMINATE = "mutation($id: String!) { terminateSandbox(input: {id: $id}) { id state } }"
+
+# bootstrap.sh registers the model under this name in Kimi Code's config.
+MODEL_ALIAS = "agent/default"
 
 
 def fail(message):
@@ -157,6 +163,46 @@ def wait_until_ready(env, pod_id, log_secret, timeout):
     fail(f"not ready after {timeout}s (status: {last})")
 
 
+def agent(base, token, path, body=None):
+    """GET, or POST when body is given, the agent's API. Responses are enveloped as {code, msg, data}."""
+    reply = http(f"{base}{path}", body, {"Authorization": f"Bearer {token}"}, timeout=60)
+    if not isinstance(reply, dict) or reply.get("code") != 0:
+        fail(f"agent {path} failed: {reply}")
+    return reply["data"]
+
+
+def run_prompt(base, token, text, workdir, timeout):
+    """Run one prompt in a new session; return the reply text and the tools it called."""
+    session = agent(base, token, "/api/v1/sessions", {"metadata": {"cwd": workdir}})["id"]
+    # Sessions created over the API start with no model, whatever config.toml's
+    # default_model says, and fail with "Model not set" until one is assigned.
+    agent(base, token, f"/api/v1/sessions/{session}/profile",
+          {"agent_config": {"model": MODEL_ALIAS, "thinking": "high", "permission_mode": "yolo"}})
+    sent = agent(base, token, f"/api/v1/sessions/{session}/prompts",
+                 {"model": MODEL_ALIAS, "content": [{"type": "text", "text": text}]})
+
+    # Two idle reads in a row, because a turn can look idle between tool steps.
+    deadline, idle = time.monotonic() + timeout, 0
+    while time.monotonic() < deadline and idle < 2:
+        time.sleep(2)
+        state = agent(base, token, f"/api/v1/sessions/{session}")
+        idle = idle + 1 if not (state["busy"] or state["main_turn_active"]) else 0
+    if idle < 2:
+        fail(f"prompt still running after {timeout}s (session {session})")
+
+    # Newest first; everything before our own message belongs to this turn.
+    items = agent(base, token, f"/api/v1/sessions/{session}/messages?page_size=100")["items"]
+    mine = next((i for i, m in enumerate(items) if m["id"] == sent["user_message_id"]), len(items))
+    tools, reply = [], ""
+    for message in reversed(items[:mine]):
+        for part in message.get("content") or []:
+            if part.get("type") == "tool_use":
+                tools.append(part.get("tool_name") or part.get("name"))
+            elif part.get("type") == "text" and message["role"] == "assistant" and part.get("text", "").strip():
+                reply = part["text"].strip()
+    return reply, tools
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     source = parser.add_mutually_exclusive_group()
@@ -172,6 +218,8 @@ def main():
     parser.add_argument("--idle-timeout", type=int, default=3600)
     parser.add_argument("--max-lifetime", type=int, default=14400)
     parser.add_argument("--timeout", type=int, default=300, help="seconds to wait for ready")
+    parser.add_argument("--prompt", help="once ready, run this prompt and print the reply")
+    parser.add_argument("--workdir", default="/home/user/workspace", help="the agent's WORKDIR, for --prompt")
     args = parser.parse_args()
     env = ENVIRONMENTS[args.env]
 
@@ -187,7 +235,7 @@ def main():
     wait_until_ready(env, pod, log_secret, args.timeout)
     print(f"ready in {time.monotonic() - started:.0f}s after create", file=sys.stderr)
 
-    print(json.dumps({
+    result = {
         "sandboxId": sandbox["id"],
         "podId": pod,
         "agentUrl": f"https://{pod}-8080.{env['proxy']}",
@@ -196,7 +244,13 @@ def main():
         "status": f"https://{pod}-8081.{env['proxy']}/{log_secret}/status.json",
         "health": f"https://{pod}-8081.{env['proxy']}/{log_secret}/health.json",
         "log": f"https://{pod}-8081.{env['proxy']}/{log_secret}/setup.log",
-    }, indent=2))
+    }
+    if args.prompt:
+        started = time.monotonic()
+        reply, tools = run_prompt(result["agentUrl"], token, args.prompt, args.workdir, args.timeout)
+        print(f"prompt answered in {time.monotonic() - started:.0f}s", file=sys.stderr)
+        result["prompt"] = {"reply": reply, "toolCalls": tools}
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,25 @@ To avoid depending on GitHub at boot, base64 the script into `BOOTSTRAP_B64` and
 
 **The proxy hostname uses the sandbox's `pod.id`, not the sandbox id.** `https://<pod-id>-8080.proxy.runpod.net` reaches the agent; the sandbox id in that position just 404s. On Runpod's dev environment the host is `dev-proxy.runpod.net`.
 
+## Talking to the agent
+
+`--prompt` on the example runs one prompt end to end and prints the reply and the tools the agent called:
+
+```bash
+python3 examples/create_sandbox.py --ref <sha> --with-mcp \
+  --prompt "Using the Runpod MCP tools, count my serverless endpoints and templates."
+```
+
+To drive the API yourself, every request carries `Authorization: Bearer $AGENT_TOKEN`, and every response is enveloped as `{"code": 0, "msg": "success", "data": {...}}`. The sequence:
+
+1. `POST /api/v1/sessions` with `{"metadata": {"cwd": "/home/user/workspace"}}`.
+2. `POST /api/v1/sessions/{id}/profile` with `{"agent_config": {"model": "agent/default", "thinking": "high", "permission_mode": "yolo"}}`.
+3. `POST /api/v1/sessions/{id}/prompts` with `{"model": "agent/default", "content": [{"type": "text", "text": "..."}]}`.
+4. Wait for the turn. `GET /api/v1/sessions/{id}` reports `busy` and `main_turn_active`; for streaming, subscribe on the `/api/v1/ws` WebSocket and wait for `prompt.completed`.
+5. `GET /api/v1/sessions/{id}/messages` — newest first. Assistant messages carry `text` and `tool_use` parts.
+
+**Skip step 2 and every prompt fails with `model.not_configured: Model not set`.** Kimi Code applies `config.toml`'s `default_model` to its own UI, not to sessions created over the API. `agent/default` is the name `bootstrap.sh` registers the model under.
+
 ## Monitoring
 
 Two documents under the log port, deliberately separate:
