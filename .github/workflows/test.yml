@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -S style bootstrap.sh test/*.sh
+      - run: python3 -m py_compile examples/*.py
+
+  lifecycle:
+    # No secrets: the agent answers its health endpoint without reaching a model.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: test/lifecycle.sh
