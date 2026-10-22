@@ -61,6 +61,11 @@ mkdir -p "$LOGDIR" "$WORKDIR" "$KIMI_CODE_HOME" "$HOME/.agents/skills"
 # Served before anything else, so a caller can watch a boot that fails early.
 python3 -m http.server "$LOG_PORT" --bind 0.0.0.0 --directory "$PUB" >/dev/null 2>&1 &
 LOG_SERVER_PID=$!
+# Until the supervisor installs its own handler, a SIGTERM (during install, or a
+# failed boot's linger) must still take the log server down with this shell.
+# Bash runs no EXIT trap when a default-handled signal kills it, hence the TERM trap.
+trap 'kill "$LOG_SERVER_PID" 2>/dev/null' EXIT
+trap 'exit 143' TERM INT
 # Also to stdout: that is what the platform's /v2/sandboxes/{id}/logs streams,
 # which gives an authenticated copy of this log alongside the public one.
 exec > >(tee -a "$LOG") 2>&1

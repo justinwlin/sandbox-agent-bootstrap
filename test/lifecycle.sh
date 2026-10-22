@@ -87,6 +87,7 @@ served() { curl -fs --max-time 5 -o /dev/null "http://127.0.0.1:$LOG_PORT/s/$1";
 state_is() { [ "$(state)" = "$1" ]; }
 log_lacks() { ! grep -qF "$1" "$LOG"; }
 agent_down() { ! healthz; }
+log_server_down() { ! curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$LOG_PORT/"; }
 all_served() { served status.json && served health.json && served setup.log; }
 secrets_private() {
   [ "$(stat -c %a "$CASE_DIR"/home/.kimi-code/{config.toml,mcp.json,server.token} | sort -u)" = 600 ]
@@ -101,6 +102,7 @@ case_missing_env() {
   check "names the missing variable" grep -q 'LLM_API_KEY is required' "$STATUS"
   check "status is served over HTTP while it lingers" served status.json
   finish
+  check "SIGTERM during the linger stops the log server" log_server_down
 }
 
 case_happy() {
@@ -138,6 +140,7 @@ case_happy() {
   BOOT_PID=
   check "reports stopped" state_is stopped
   check "releases the agent port" agent_down
+  check "stops the log server" log_server_down
 }
 
 case_custom_agents_md() {
